@@ -1,12 +1,3 @@
---#---------------------------------------------------------------------------------------------------------
---#Pig Script Name : HEBClaimsExtract.pig
---#Author : Manish Srivastava
---#Date : Mar 22,2015
---#Purpose : Objective of the script to extract all the claims for magenta provider.
---#Version : 1.0
---#History/date :
---#--------------------------------------------------------------------------------------------------------
-
 /*@@
 STEP1 : Load all claims for previous day.
 @*/
