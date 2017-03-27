@@ -1,0 +1,153 @@
+/*@@
+STEP1 : Parse medical data from based on the positions defined
+@*/
+
+REGISTER $LIB_PATH/piggybank-0.13.0.jar;
+REGISTER $LIB_PATH/piggybank-extn.jar;
+DEFINE XPath org.apache.pig.piggybank.evaluation.xml.XPath();
+DEFINE XParser org.apache.pig.piggybank.storage.custom.XParser();
+DEFINE SequenceFileLoader org.apache.pig.piggybank.storage.SequenceFileLoader();
+LOAD_INITIAL_DATA = LOAD '$input_path' USING SequenceFileLoader AS (key:long, val:chararray);
+LOAD_DATA = foreach LOAD_INITIAL_DATA generate REPLACE(val, '<.xml version=.1.0. encoding=.UTF-8..>', '') AS val;
+
+/*@@
+Extract medical data from Sequence file
+@*/
+INITIAL_EXTRACT = FOREACH LOAD_DATA GENERATE
+XParser(val, 'CTS2ODS:FNLZD_CSL',true,'FNLZD_SVC_LN_NBR,SVC_BEG_DT,SVC_END_DT,SVC_ITM_CD')  AS FNLZDCSL,
+XPath(val, '/CLAIM/CLM/@PLCY_ID')                AS MemberId ,
+XPath(val, '/CLAIM/CLM/@CLM_ID')             AS ClaimId ,
+XPath(val, '/CLAIM/CLM/@DCN')             AS ClaimDCNId ,
+XPath(val, 'CLAIM/FNLZD_CLM_DIAG[@CLM_DIAG_SEQ_NBR =1]/@DIAG_CD')                  AS PDC,
+XPath(val, 'CLAIM/FNLZD_CLM_DIAG[@CLM_DIAG_SEQ_NBR =2]/@DIAG_CD')                  AS SDC,
+XPath(val, 'CLAIM/FNLZD_CLM_DIAG[@CLM_DIAG_SEQ_NBR =3]/@DIAG_CD')                  AS TDC,
+XPath(val, 'CLAIM/FNLZD_CLM_DIAG[@CLM_DIAG_SEQ_NBR =4]/@DIAG_CD')                  AS FDC,
+XPath(val, 'CLAIM/FNLZD_CLM_DIAG[@CLM_DIAG_SEQ_NBR =5]/@DIAG_CD')                  AS FTDC,
+XPath(val, 'CLAIM/CLM_DETL/@ICD_VRSN_CD')                  AS ICD_VER_CD  ,
+XPath(val, '/CLAIM/CLM/@GRP_NBR')                  AS GRP_NBR,
+XPath(val, '/CLAIM/CLM/@SECT_NBR')                  AS SECT_NBR,
+val;
+
+/*@@ 
+STEP2: Filter data for TMG claims only
+@*/
+GRPSECT_FILTER_EXTRACT = FILTER INITIAL_EXTRACT BY (int)ClaimId < 0 AND SUBSTRING(TRIM(ClaimDCNId), 0 ,3)=='TMG';
+
+
+/*@@ 
+STEP3: Flatten data for Service line number so if there are 3 service line number in a claim then flatten it to 3 rows
+@*/
+FLAT_DATA = FOREACH GRPSECT_FILTER_EXTRACT GENERATE FLATTEN(FNLZDCSL) as (LN_NBR:chararray,BEG_DT:chararray,END_DT:chararray,SVC_ITM_CD:chararray),MemberId AS MemberId,ClaimId AS ClaimId,ClaimDCNId AS ClaimDCNId,PDC AS PDC,SDC AS SDC,TDC AS TDC,FDC AS FDC,FTDC AS FTDC,ICD_VER_CD AS ICD_VER_CD,
+SUBSTRING(TRIM(GRP_NBR), 3 ,((int)(SIZE(TRIM(GRP_NBR))))) AS GRP_NBR, 
+TRIM(SECT_NBR) AS SECT_NBR,
+val AS val ;
+
+
+/*@@
+STEP4 : Read groups sections filters defined for this extract.
+@*/
+
+GRP_SECT = LOAD '$InputFilterData' USING PigStorage('|') AS (group_nbr:chararray, sect_nbr:chararray);
+
+/*@@
+STEP5 : Filter Medical data based on group sections defined from filter feed.
+@*/
+
+JOIN_DATA = 
+JOIN
+FLAT_DATA BY (TRIM(GRP_NBR),TRIM(SECT_NBR)),
+GRP_SECT BY (TRIM(group_nbr),TRIM(sect_nbr));
+
+
+/*@@
+STEP6 : Get Procedure code and procedure modifier code for each service line number
+@*/
+
+
+MEDICAL_DATA_All = FOREACH JOIN_DATA GENERATE LN_NBR,BEG_DT,END_DT,SVC_ITM_CD, MemberId AS MemberId,ClaimId AS ClaimId,ClaimDCNId AS ClaimDCNId,PDC AS PDC,SDC AS SDC,TDC AS TDC,FDC AS FDC,FTDC AS FTDC,ICD_VER_CD AS ICD_VER_CD,
+XPath(val, CONCAT('/CLAIM/FNLZD_FCLTY_CLM_PROCD[@PROCD_CD_SEQ_NBR=',LN_NBR,']/@PROCD_CD'))  AS PROC_CD ,
+GRP_NBR AS GRP_NBR,SECT_NBR AS SECT_NBR,
+XPath(val, CONCAT('CLAIM/FNLZD_CSL_PROCD_MDFYR[@MDFYR_CD_SEQ =1][@FNLZD_SVC_LN_NBR=',LN_NBR,']/@SVC_ITM_MDFYR_CD')) AS PROC_CD_MODF
+,val AS val   ;
+
+
+/*@@
+STEP7 : set default and Format each data as expected in output
+@*/
+
+
+MEDICAL_DATA = FOREACH MEDICAL_DATA_All GENERATE
+SUBSTRING(TRIM(MemberId), 7 ,((int)(SIZE(TRIM(MemberId))))) as MemberId,
+'' AS PATIENT_LAST_NAME,
+'' AS PATIENT_FIRST_NAME,
+'' AS PATIENT_SSN,
+'' AS PATIENT_DOB,
+ClaimDCNId AS ClaimDCNId,
+LN_NBR AS ServiceLineNumForClaim,
+(CASE 
+WHEN SIZE(TRIM(PDC))>3 THEN CONCAT(SUBSTRING(TRIM(PDC),0,3),'.',SUBSTRING(TRIM(PDC),3,((int)(SIZE(TRIM(PDC)))))) 
+WHEN SIZE(TRIM(PDC))==0 THEN '' 
+WHEN SIZE(TRIM(PDC))<=3 THEN PDC 
+END) AS Primary_Diagnosis_Code,
+(CASE 
+WHEN SIZE(TRIM(SDC))>3 THEN CONCAT(SUBSTRING(TRIM(SDC),0,3),'.',SUBSTRING(TRIM(SDC),3,((int)(SIZE(TRIM(SDC)))))) 
+WHEN SIZE(TRIM(SDC))==0 THEN '' 
+WHEN SIZE(TRIM(SDC))<=3 THEN SDC 
+END) AS Secondary_Diagnosis_Code,
+(CASE 
+WHEN SIZE(TRIM(TDC))>3 THEN CONCAT(SUBSTRING(TRIM(TDC),0,3),'.',SUBSTRING(TRIM(TDC),3,((int)(SIZE(TRIM(TDC)))))) 
+WHEN SIZE(TRIM(TDC))==0 THEN '' 
+WHEN SIZE(TRIM(TDC))<=3 THEN TDC 
+END) AS Tertiary_Diagnosis_Code,
+(CASE 
+WHEN SIZE(TRIM(FDC))>3 THEN CONCAT(SUBSTRING(TRIM(FDC),0,3),'.',SUBSTRING(TRIM(FDC),3,((int)(SIZE(TRIM(FDC)))))) 
+WHEN SIZE(TRIM(FDC))==0 THEN '' 
+WHEN SIZE(TRIM(FDC))<=3 THEN FDC 
+END) AS Fourth_Diagnosis_Code,
+(CASE 
+WHEN SIZE(TRIM(FTDC))>3 THEN CONCAT(SUBSTRING(TRIM(FTDC),0,3),'.',SUBSTRING(TRIM(FTDC),3,((int)(SIZE(TRIM(FTDC)))))) 
+WHEN SIZE(TRIM(FTDC))==0 THEN '' 
+WHEN SIZE(TRIM(FTDC))<=3 THEN FTDC 
+END) AS Fifth_Diagnosis_Code,
+(CASE 
+WHEN SIZE(TRIM(ICD_VER_CD))==0 THEN '' 
+WHEN ICD_VER_CD=='N' THEN '09' 
+WHEN ICD_VER_CD=='T' THEN '10'
+ELSE ICD_VER_CD 
+END) AS ICD_VER_CD,
+PROC_CD AS PROC_CD,
+(CASE 
+WHEN SIZE(TRIM(PROC_CD_MODF))==0 THEN 
+XPath(val, CONCAT('CLAIM/FNLZD_CSL_PROCD_MDFYR[@FNLZD_SVC_LN_NBR=',LN_NBR,']/@SVC_ITM_MDFYR_CD')) 
+ELSE PROC_CD_MODF 
+END) AS PROC_CD_MODF,
+BEG_DT AS BEG_DT, 
+END_DT AS END_DT,
+'' AS Service_Code,
+SVC_ITM_CD AS SVC_ITM_CD,
+'' AS PROV_TAXONMY;
+
+
+
+/*@@
+Remove Duplicates
+@*/
+
+group_medical_data= GROUP MEDICAL_DATA BY (MemberId,ClaimDCNId,ServiceLineNumForClaim,Primary_Diagnosis_Code,Secondary_Diagnosis_Code,Tertiary_Diagnosis_Code,
+Fourth_Diagnosis_Code,Fifth_Diagnosis_Code,
+ICD_VER_CD,PROC_CD,PROC_CD_MODF,BEG_DT,END_DT,
+Service_Code,SVC_ITM_CD,PROV_TAXONMY);
+
+pce_final_extract = FOREACH group_medical_data {
+      top_rec = LIMIT MEDICAL_DATA 1;
+      GENERATE FLATTEN(top_rec);
+      };
+
+/*STORE MEDICAL_DATA INTO '/test/work/manish_test/PCE/extract/';*/
+
+STORE pce_final_extract INTO '$ExtractDir' USING PigStorage('|');
+
+
+/*STORE MEDICAL_DATA INTO 'test/' USING PigStorage('|');*/
+
+/*DUMP MEDICAL_DATA;*/
