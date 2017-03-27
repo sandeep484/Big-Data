@@ -1,0 +1,111 @@
+--#---------------------------------------------------------------------------------------------------------
+--#Pig Script Name : HEBClaimsExtract.pig
+--#Author : Manish Srivastava
+--#Date : Mar 22,2015
+--#Purpose : Objective of the script to extract all the claims for magenta provider.
+--#Version : 1.0
+--#History/date :
+--#--------------------------------------------------------------------------------------------------------
+
+/*@@
+STEP1 : Load all claims for previous day.
+@*/
+
+REGISTER $LIBRARY_PATH/piggybank-0.13.0.jar;
+REGISTER $LIBRARY_PATH/piggybank-extn.jar;
+DEFINE XPath org.apache.pig.piggybank.evaluation.xml.XPath();
+DEFINE XParser org.apache.pig.piggybank.storage.custom.XParser();
+DEFINE XMaxMinParser org.apache.pig.piggybank.storage.custom.XMaxMinParser();
+DEFINE GenerateId org.apache.pig.piggybank.storage.custom.GenerateId();
+DEFINE SequenceFileLoader org.apache.pig.piggybank.storage.SequenceFileLoader();
+
+LOAD_INITIAL_DATA = LOAD '$input_path' USING SequenceFileLoader AS (key:long, val:chararray);
+
+
+
+/*@@
+STEP2 : Filter on finalized claims.
+@*/
+
+FILTER_DATA = FILTER LOAD_INITIAL_DATA BY (XPath(val, '/CLAIM/CLM/@CLM_PROC_ST_CD') == 'C')
+and (XPath(val, '/CLAIM/CLM/@CLM_PROC_SUBST_CD') == 'F') 
+and (XPath(val, '/CLAIM/EVENT_TYPE') != 'P') ;
+
+/*@@
+STEP3 : Extract required information from all finalized claim using xpath
+@*/
+
+Initial_Extract = FOREACH FILTER_DATA GENERATE
+XPath(val, '/CLAIM/CLM/@CLM_ID')                AS CLM_ID ,
+XPath(val, '/CLAIM/CLM/@CLM_MBR_ID')                AS CLM_MBR_ID ,
+XMaxMinParser(val, 'CLM_SVC_LN', false , 'SVC_BEG_DT')                AS SVC_BEG_DT ,
+XMaxMinParser(val, 'CLM_SVC_LN', true , 'SVC_END_DT')                AS SVC_END_DT ,
+XPath(val, 'CLAIM/FNLZD_CLM_PROV[@PROV_FUNC_CD ="BI"]/@NPI')                  AS NPI,
+XPath(val, '/CLAIM/CLM/@GRP_NBR')                  AS GRP_NBR,
+XPath(val, '/CLAIM/CLM/@SECT_NBR')                  AS SECT_NBR ,
+XPath(val, '/CLAIM/CLM/@CORP_ENT_CD')                  AS CORP_ENT_CD,
+XPath(val, '/CLAIM/CLM/@DCN')                  AS DCN ,
+XPath(val, '/CLAIM/CLM/@ADJSTMT_NBR')             AS ADJSTMT_NBR ,
+val;
+
+
+
+/*@@
+STEP4 : Read NPI and Group number filters defined for this extract.
+@*/
+
+NPI_SECT = LOAD '$InputFilterData' USING PigStorage('|') AS (BI_NPI:chararray, group_nbr:chararray);
+/*NPI_SECT = LOAD '/test/smith/magenta/heb_clm_filter/heb_filter.txt' USING PigStorage('|') AS (BI_NPI:chararray, group_nbr:chararray);*/
+
+
+/*@@
+STEP5 : Filter claims data based on providerId and Group number defined from filter feed.
+@*/
+
+JOIN_DATA = 
+JOIN
+Initial_Extract BY (TRIM(NPI),TRIM(GRP_NBR)),
+NPI_SECT BY (TRIM(BI_NPI),TRIM(group_nbr));
+
+
+
+HEB_DATA_All = FOREACH JOIN_DATA GENERATE
+GenerateId() AS HEB_CLM_MBR_ID,
+CLM_ID  ,
+CLM_MBR_ID ,
+SVC_BEG_DT,
+SVC_END_DT,
+NPI,
+GRP_NBR,
+SECT_NBR,
+CORP_ENT_CD,
+DCN,
+ADJSTMT_NBR,
+ToString(CurrentTime(),'yyyy-MM-dd') as ETL_START_DATE:chararray,
+'9999-12-31' as ETL_END_DATE,
+ToString(CurrentTime(),'yyyy-MM-dd HH:mm:ss.SSSSSS') as ETL_LST_UPDT_TS:chararray,
+'A' as SRC_REC_STA_CD:chararray,
+'Datalake' as SRC_SYS_CD:chararray,
+CONCAT(CLM_ID ,'^', CLM_MBR_ID) as SRC_SYS_UNQ_KEY_TXT:chararray
+;
+
+
+ /*@@
+Remove Duplicates
+@*/
+
+GROUP_HEB_DATA= GROUP HEB_DATA_All BY (CLM_MBR_ID);
+
+HEB_FINAL_EXTRACT = FOREACH GROUP_HEB_DATA {
+      top_rec = LIMIT HEB_DATA_All 1;
+      GENERATE FLATTEN(top_rec);
+      };
+
+
+/*STORE HEB_DATA INTO '/test/work/manish_test/PCE/extract/';*/
+
+
+
+STORE HEB_FINAL_EXTRACT  INTO '$ExtractDir' USING PigStorage(',');
+
+/*DUMP HEB_DATA_All;*/
